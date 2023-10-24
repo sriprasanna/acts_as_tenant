@@ -4,34 +4,35 @@ module ActsAsTenant
 
     class_methods do
       def acts_as_tenant(tenant = :account, scope = nil, **options)
-        ActsAsTenant.set_tenant_klass(tenant)
-        ActsAsTenant.mutable_tenant!(false)
+        tenant_name = options[:tenant_name] || ActsAsTenant::CURRENT_TENANT
+        ActsAsTenant.set_named_tenant_klass(tenant_name, tenant)
+        ActsAsTenant.mutable_named_tenant!(tenant_name, false)
 
         ActsAsTenant.add_global_record_model(self) if options[:has_global_records]
 
         # Create the association
         valid_options = options.slice(:foreign_key, :class_name, :inverse_of, :optional, :primary_key, :counter_cache, :polymorphic, :touch)
-        fkey = valid_options[:foreign_key] || ActsAsTenant.fkey
+        fkey = valid_options[:foreign_key] || ActsAsTenant.fkey(tenant_name)
         pkey = valid_options[:primary_key] || ActsAsTenant.pkey
-        polymorphic_type = valid_options[:foreign_type] || ActsAsTenant.polymorphic_type
+        polymorphic_type = valid_options[:foreign_type] || ActsAsTenant.polymorphic_type(tenant_name)
         belongs_to tenant, scope, **valid_options
 
         default_scope lambda {
-          if ActsAsTenant.should_require_tenant? && ActsAsTenant.current_tenant.nil? && !ActsAsTenant.unscoped?
+          if ActsAsTenant.should_require_tenant? && ActsAsTenant.named_tenant(tenant_name).nil? && !ActsAsTenant.unscoped?
             raise ActsAsTenant::Errors::NoTenantSet
           end
 
-          if ActsAsTenant.current_tenant
-            keys = [ActsAsTenant.current_tenant.send(pkey)].compact
+          if ActsAsTenant.named_tenant(tenant_name)
+            keys = [ActsAsTenant.named_tenant(tenant_name).send(pkey)].compact
             keys.push(nil) if options[:has_global_records]
 
             if options[:through]
               query_criteria = {options[:through] => {fkey.to_sym => keys}}
-              query_criteria[polymorphic_type.to_sym] = ActsAsTenant.current_tenant.class.to_s if options[:polymorphic]
+              query_criteria[polymorphic_type.to_sym] = ActsAsTenant.named_tenant(tenant_name).class.to_s if options[:polymorphic]
               joins(options[:through]).where(query_criteria)
             else
               query_criteria = {fkey.to_sym => keys}
-              query_criteria[polymorphic_type.to_sym] = ActsAsTenant.current_tenant.class.to_s if options[:polymorphic]
+              query_criteria[polymorphic_type.to_sym] = ActsAsTenant.named_tenant(tenant_name).class.to_s if options[:polymorphic]
               where(query_criteria)
             end
           else
@@ -44,12 +45,12 @@ module ActsAsTenant
         # - validate that associations belong to the tenant, currently only for belongs_to
         #
         before_validation proc { |m|
-          if ActsAsTenant.current_tenant
+          if ActsAsTenant.named_tenant(tenant_name)
             if options[:polymorphic]
-              m.send("#{fkey}=".to_sym, ActsAsTenant.current_tenant.class.to_s) if m.send(fkey.to_s).nil?
-              m.send("#{polymorphic_type}=".to_sym, ActsAsTenant.current_tenant.class.to_s) if m.send(polymorphic_type.to_s).nil?
+              m.send("#{fkey}=".to_sym, ActsAsTenant.named_tenant(tenant_name).class.to_s) if m.send(fkey.to_s).nil?
+              m.send("#{polymorphic_type}=".to_sym, ActsAsTenant.named_tenant(tenant_name).class.to_s) if m.send(polymorphic_type.to_s).nil?
             else
-              m.send "#{fkey}=".to_sym, ActsAsTenant.current_tenant.send(pkey)
+              m.send "#{fkey}=".to_sym, ActsAsTenant.named_tenant(tenant_name).send(pkey)
             end
           end
         }, on: :create
@@ -82,13 +83,13 @@ module ActsAsTenant
         to_include = Module.new {
           define_method "#{fkey}=" do |integer|
             write_attribute(fkey.to_s, integer)
-            raise ActsAsTenant::Errors::TenantIsImmutable if !ActsAsTenant.mutable_tenant? && tenant_modified?
+            raise ActsAsTenant::Errors::TenantIsImmutable if !ActsAsTenant.mutable_named_tenant?(tenant_name) && tenant_modified?
             integer
           end
 
-          define_method "#{ActsAsTenant.tenant_klass}=" do |model|
+          define_method "#{ActsAsTenant.named_tenant_klass(tenant_name)}=" do |model|
             super(model)
-            raise ActsAsTenant::Errors::TenantIsImmutable if !ActsAsTenant.mutable_tenant? && tenant_modified?
+            raise ActsAsTenant::Errors::TenantIsImmutable if !ActsAsTenant.mutable_named_tenant?(tenant_name) && tenant_modified?
             model
           end
 
@@ -108,7 +109,8 @@ module ActsAsTenant
       def validates_uniqueness_to_tenant(fields, args = {})
         raise ActsAsTenant::Errors::ModelNotScopedByTenant unless respond_to?(:scoped_by_tenant?)
 
-        fkey = reflect_on_association(ActsAsTenant.tenant_klass).foreign_key
+        tenant_name = args[:tenant_name] || ActsAsTenant::CURRENT_TENANT
+        fkey = reflect_on_association(ActsAsTenant.named_tenant_klass(tenant_name)).foreign_key
 
         validation_args = args.deep_dup
         validation_args[:scope] = if args[:scope]

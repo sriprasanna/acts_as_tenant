@@ -9,10 +9,12 @@ module ActsAsTenant
   autoload :ModelExtensions, "acts_as_tenant/model_extensions"
   autoload :TenantHelper, "acts_as_tenant/tenant_helper"
 
+  CURRENT_TENANT = :current_tenant
+
   @@configuration = nil
-  @@tenant_klass = nil
+  @@named_tenant_klasses = {}
   @@models_with_global_records = []
-  @@mutable_tenant = false
+  @@mutable_named_tenants = {}
 
   class << self
     attr_writer :default_tenant
@@ -28,12 +30,12 @@ module ActsAsTenant
     @@configuration || configure
   end
 
-  def self.set_tenant_klass(klass)
-    @@tenant_klass = klass
+  def self.set_named_tenant_klass(name, klass)
+    @@named_tenant_klasses[name.to_sym] = klass
   end
 
-  def self.tenant_klass
-    @@tenant_klass
+  def self.named_tenant_klass(name)
+    @@named_tenant_klasses[name.to_sym]
   end
 
   def self.models_with_global_records
@@ -44,24 +46,32 @@ module ActsAsTenant
     @@models_with_global_records.push(model)
   end
 
-  def self.fkey
-    "#{@@tenant_klass}_id"
+  def self.fkey(name)
+    "#{named_tenant_klass(name)}_id"
   end
 
   def self.pkey
     ActsAsTenant.configuration.pkey
   end
 
-  def self.polymorphic_type
-    "#{@@tenant_klass}_type"
+  def self.polymorphic_type(name)
+    "#{named_tenant_klass(name)}_type"
+  end
+
+  def self.set_named_tenant(name, tenant)
+    RequestStore.store[name.to_sym] = tenant
+  end
+
+  def self.named_tenant(name)
+    RequestStore.store[name.to_sym]
   end
 
   def self.current_tenant=(tenant)
-    RequestStore.store[:current_tenant] = tenant
+    set_named_tenant(CURRENT_TENANT, tenant)
   end
 
   def self.current_tenant
-    RequestStore.store[:current_tenant] || test_tenant || default_tenant
+    named_tenant(CURRENT_TENANT) || test_tenant || default_tenant
   end
 
   def self.test_tenant=(tenant)
@@ -88,12 +98,20 @@ module ActsAsTenant
     @default_tenant unless unscoped
   end
 
+  def self.mutable_named_tenant!(name, toggle)
+    @@mutable_named_tenants[name.to_sym] = toggle
+  end
+
+  def self.mutable_named_tenant?(name)
+    @@mutable_named_tenants[name.to_sym]
+  end
+
   def self.mutable_tenant!(toggle)
-    @@mutable_tenant = toggle
+    mutable_named_tenant!(CURRENT_TENANT, toggle)
   end
 
   def self.mutable_tenant?
-    @@mutable_tenant
+    mutable_named_tenant?(CURRENT_TENANT)
   end
 
   def self.with_tenant(tenant, &block)
